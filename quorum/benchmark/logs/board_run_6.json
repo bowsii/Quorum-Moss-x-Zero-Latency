@@ -1,0 +1,55 @@
+{
+  "arm": "board",
+  "run_id": "bench-run-6-032c2d90",
+  "question": "What are the core technical trade-offs between centralized and decentralized multi-agent coordination architectures?",
+  "total_latency_ms": 85.45,
+  "steps": [
+    {
+      "step_index": 0,
+      "agent_id": "agent-1-literature",
+      "role": "Literature Researcher",
+      "sense_ms": 11.51,
+      "claim_ms": 25.78,
+      "write_ms": 20.31,
+      "claim_resolved": true,
+      "external_call_made": true,
+      "redundancy_prevented": true
+    },
+    {
+      "step_index": 1,
+      "agent_id": "agent-2-data",
+      "role": "Data Analyst",
+      "sense_ms": 18.54,
+      "claim_ms": 16.94,
+      "write_ms": 20.88,
+      "claim_resolved": true,
+      "external_call_made": true,
+      "redundancy_prevented": true
+    },
+    {
+      "step_index": 2,
+      "agent_id": "agent-3-critique",
+      "role": "Critique Specialist",
+      "sense_ms": 16.84,
+      "claim_ms": 23.65,
+      "write_ms": 11.97,
+      "claim_resolved": true,
+      "external_call_made": true,
+      "redundancy_prevented": true
+    },
+    {
+      "step_index": 3,
+      "agent_id": "agent-4-synthesis",
+      "role": "Synthesis Builder",
+      "sense_ms": 28.16,
+      "claim_ms": 10.07,
+      "write_ms": 10.22,
+      "claim_resolved": true,
+      "external_call_made": true,
+      "redundancy_prevented": true
+    }
+  ],
+  "total_messages": 4,
+  "redundancy_eliminated": 4,
+  "collision_window_integrity": 100.0
+}

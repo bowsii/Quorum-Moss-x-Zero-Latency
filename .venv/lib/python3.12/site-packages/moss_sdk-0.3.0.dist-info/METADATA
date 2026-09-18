@@ -1,0 +1,229 @@
+Metadata-Version: 2.4
+Name: moss-sdk
+Version: 0.3.0
+Summary: Cryptographic identity and signed outputs for AI agents
+Project-URL: Homepage, https://mosscomputing.com
+Project-URL: Repository, https://github.com/mosscomputing/moss
+Author: IAMPASS Inc.
+License: Proprietary - See LICENSE
+License-File: LICENSE
+Keywords: agents,ai,cryptography,identity,post-quantum,signing
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: Other/Proprietary License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Requires-Dist: cryptography>=41.0.0
+Requires-Dist: dilithium-py>=0.1.0
+Provides-Extra: dev
+Requires-Dist: httpx>=0.25.0; extra == 'dev'
+Requires-Dist: pytest-cov>=4.0.0; extra == 'dev'
+Requires-Dist: pytest>=7.0.0; extra == 'dev'
+Provides-Extra: enterprise
+Requires-Dist: httpx>=0.25.0; extra == 'enterprise'
+Description-Content-Type: text/markdown
+
+# MOSS
+
+**Unsigned agent output is broken output.**
+
+MOSS (Message-Origin Signing System) provides cryptographic signing for AI agents. Every output is signed with ML-DSA-44 (post-quantum), creating non-repudiable execution records with audit-grade provenance.
+
+[![CI](https://github.com/mosscomputing/moss/actions/workflows/ci.yml/badge.svg)](https://github.com/mosscomputing/moss/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/moss-sdk)](https://pypi.org/project/moss-sdk/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## Install
+```bash
+pip install moss-sdk
+```
+
+## Quick Start
+```python
+from moss import sign, verify
+
+# Sign any agent output
+result = sign(
+    output={"action": "transfer", "amount": 500},
+    agent_id="agent-finance-01",
+    context={"user_id": "u123"}
+)
+
+# result.envelope: MOSS Envelope with signature
+# result.signature: ML-DSA-44 post-quantum signature
+# result.allowed: True (or False if enterprise policy blocks)
+
+# Verify offline - no MOSS servers required
+verify_result = verify(result.envelope)
+if verify_result.valid:
+    print(f"Signed by: {verify_result.subject}")
+```
+
+## Enterprise Mode
+
+Set `MOSS_API_KEY` to enable enterprise features:
+
+```python
+import os
+os.environ["MOSS_API_KEY"] = "your-api-key"
+
+from moss import sign, enterprise_enabled
+
+# Check if enterprise mode is active
+print(f"Enterprise: {enterprise_enabled()}")  # True
+
+# Sign with automatic policy evaluation
+result = sign(
+    output={"action": "high_risk_transfer", "amount": 1000000},
+    agent_id="finance-bot",
+    action="transfer",
+    context={"user_id": "u123", "department": "finance"}
+)
+
+if result.blocked:
+    print(f"Action blocked: {result.policy.reason}")
+else:
+    print(f"Action allowed, evidence_id: {result.evidence_id}")
+```
+
+## Execution Record Format
+
+Every signed action produces a verifiable execution record:
+
+```
+agent_id:      moss:agent:agent-finance-01
+action:        transfer
+timestamp:     2026-01-18T12:34:56Z
+sequence:      42
+payload_hash:  SHA-256:abc123...
+signature:     ML-DSA-44:xyz789...
+status:        VERIFIED
+```
+
+## Using Subject (Advanced)
+```python
+from moss import Subject
+
+agent = Subject.create("moss:dev:my-agent")
+envelope = agent.sign({"action": "approved", "amount": 500})
+
+result = Subject.verify(envelope)
+assert result.valid
+```
+
+## TypeScript SDK
+```bash
+npm install @moss/sdk
+```
+
+```typescript
+import { sign, verify } from '@moss/sdk';
+
+const envelope = await sign({
+  output: agentResponse,
+  agentId: "agent-finance-01"
+});
+
+const result = await envelope.verify();
+```
+
+## Framework Integrations
+
+| Package | Framework | Install |
+|---------|-----------|---------|
+| `moss-langchain` | LangChain | `pip install moss-langchain` |
+| `moss-langgraph` | LangGraph | `pip install moss-langgraph` |
+| `moss-crewai` | CrewAI | `pip install moss-crewai` |
+| `moss-autogen` | AutoGen | `pip install moss-autogen` |
+| `moss-openai` | OpenAI SDK | `pip install moss-openai` |
+| `moss-anthropic` | Anthropic SDK | `pip install moss-anthropic` |
+| `moss-google` | Google GenAI | `pip install moss-google` |
+
+## CLI
+```bash
+moss subject create moss:dev:my-agent
+echo '{"action": "test"}' | moss sign moss:dev:my-agent - > envelope.json
+moss verify payload.json envelope.json
+```
+
+## What MOSS Provides
+
+| Capability | Description |
+|------------|-------------|
+| **Mandatory Signing** | Every agent action is signed |
+| **Offline Verification** | Verify without network access |
+| **Post-Quantum Security** | ML-DSA-44 (FIPS 204) |
+| **Provenance** | Non-repudiable execution history |
+
+## What MOSS Does NOT Provide (Free Tier)
+
+| Limitation | Solution |
+|------------|----------|
+| Long-term retention | Upgrade to Evidence tier |
+| Audit exports | Upgrade to Evidence tier |
+| Evidence continuity | Upgrade to Defensible tier |
+
+> **Production environments require retained, verifiable execution records.**  
+> Free tier provides runtime enforcement. See [mosscomputing.com](https://mosscomputing.com) for evidence continuity options.
+
+## Protocol
+
+MOSS implements `moss-0001`. See [SPEC.md](SPEC.md).
+
+### Envelope
+```json
+{
+  "spec": "moss-0001",
+  "version": 1,
+  "alg": "ML-DSA-44",
+  "subject": "moss:acme:order-bot",
+  "key_version": 1,
+  "seq": 42,
+  "issued_at": 1733200000,
+  "payload_hash": "<base64url(SHA-256(canonical(payload)))>",
+  "signature": "<base64url(ML-DSA-44 signature)>"
+}
+```
+
+### Verification
+
+1. Check `spec == "moss-0001"`
+2. Compute `hash = base64url(SHA-256(canonical(payload)))`
+3. Assert `hash == envelope.payload_hash`
+4. Resolve `(subject, key_version) → public_key`
+5. Verify `ML-DSA-44.verify(public_key, canonical(signed_bytes), signature)`
+
+## Cryptography
+
+| | |
+|---|---|
+| Signatures | ML-DSA-44 (FIPS 204) |
+| Hash | SHA-256 |
+| Encoding | base64url, no padding |
+| Canonicalization | RFC 8785 |
+| Key storage | AES-256-GCM + Scrypt |
+
+Keys stored at `~/.moss/keys/`. Set `MOSS_KEY_PASSPHRASE` to encrypt at rest.
+
+## Links
+
+- [mosscomputing.com](https://mosscomputing.com) — Project site
+- [app.mosscomputing.com](https://app.mosscomputing.com) — Dashboard
+- [SPEC.md](SPEC.md) — Protocol specification
+- [PyPI](https://pypi.org/project/moss-sdk/) — Package
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+Report vulnerabilities to moss@iampass.com. See [SECURITY.md](SECURITY.md).
+
+## License
+
+Proprietary - See [LICENSE](LICENSE) for terms.

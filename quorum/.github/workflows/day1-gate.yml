@@ -1,0 +1,73 @@
+name: Day 1 Latency Gate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  day1-gate:
+    name: Run Day 1 Latency Gate (Phase 1)
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: quorum/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          cd quorum
+          pip install -r requirements.txt
+
+      - name: Run Day 1 Latency Gate
+        run: |
+          cd quorum
+          python benchmark/day1_latency_gate.py
+        # Exits non-zero on gate failure — will fail the CI job
+
+      - name: Upload gate results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: day1-gate-results
+          path: quorum/benchmark/day1_results.json
+          retention-days: 90
+
+      - name: Comment gate results on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            try {
+              const results = JSON.parse(fs.readFileSync('quorum/benchmark/day1_results.json', 'utf8'));
+              const passed = results.overall_gate_passed;
+              const body = [
+                `## Day 1 Latency Gate ${passed ? '✅ PASSED' : '❌ FAILED'}`,
+                '',
+                '| Test | Target | sense_p99 | write_p99 | Status |',
+                '|---|---|---|---|---|',
+                `| Test 1 - Standalone | sense<10ms, write<15ms | ${results.test1?.sense_p99?.toFixed(2)}ms | ${results.test1?.write_p99?.toFixed(2)}ms | ${results.test1?.gate_passed ? '✅' : '❌'} |`,
+                `| Test 2 - Concurrent | p99<20ms, <30% degradation | ${results.test2?.sense_p99_concurrent?.toFixed(2)}ms | - | ${results.test2?.gate_passed ? '✅' : '❌'} |`,
+                `| Test 3 - Index growth | all sense<10ms | seed:${results.test3?.seed_p99?.toFixed(2)}ms | +80:${results.test3?.plus80_p99?.toFixed(2)}ms | ${results.test3?.gate_passed ? '✅' : '❌'} |`,
+                `| Test 4 - GC profile | informational | peak:${results.test4?.peak_memory_mb?.toFixed(1)}MB | - | ✅ |`,
+              ].join('\n');
+              
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } catch (e) {
+              console.log('Could not post results comment:', e.message);
+            }

@@ -1,0 +1,18 @@
+{
+  "timestamp": "2026-09-18T04:40:52.232719+00:00",
+  "n_iterations": 10,
+  "question": "What are the core technical trade-offs between centralized and decentralized multi-agent coordination architectures?",
+  "board_arm": {
+    "latency_mean_ms": 76.43,
+    "latency_stdev_ms": 11.62,
+    "latency_p50_ms": 79.1,
+    "total_redundancy_eliminated": 36,
+    "collision_window_integrity_pct": 100.0
+  },
+  "relay_arm": {
+    "latency_mean_ms": 81.19,
+    "latency_stdev_ms": 0.19,
+    "latency_p50_ms": 81.25,
+    "redundancy_eliminated": 0
+  }
+}

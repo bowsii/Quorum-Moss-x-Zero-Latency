@@ -1,0 +1,40 @@
+{
+  "timestamp": 1789706042.9015243,
+  "overall_gate_passed": true,
+  "test1": {
+    "sense_p50": 0.82,
+    "sense_p99": 1.944,
+    "write_p50": 6.474,
+    "write_p99": 12.805,
+    "n_iterations": 1000,
+    "gate_passed": true
+  },
+  "test2": {
+    "sense_p99_concurrent": 1.737,
+    "degradation_pct": 0.0,
+    "n_total": 1000,
+    "gate_passed": true
+  },
+  "test3": {
+    "seed_p99": 1.97,
+    "plus20_p99": 1.873,
+    "plus80_p99": 2.669,
+    "gate_passed": true
+  },
+  "test4": {
+    "peak_memory_mb": 0.03,
+    "memory_delta_mb": 0.02,
+    "gc_count_before": [
+      0,
+      0,
+      0
+    ],
+    "gc_count_after": [
+      104,
+      0,
+      0
+    ],
+    "gc_correlation_note": "No GC pause correlation with p99 outliers detected (sub-1ms execution).",
+    "gate_passed": true
+  }
+}

@@ -1,0 +1,55 @@
+MOSS SOFTWARE LICENSE AGREEMENT
+Copyright (c) 2025 IAMPASS Inc. All Rights Reserved.
+
+1. DEFINITIONS
+   "Software" means the MOSS SDK, integrations, and related code.
+   "Free Tier" means use within the limits specified at mosscomputing.com/pricing.
+   "Enterprise Features" means policy evaluation, evidence retention, and audit exports.
+
+2. GRANT OF LICENSE
+   IAMPASS Inc. grants you a limited, non-exclusive, non-transferable, 
+   revocable license to use the Software subject to these terms.
+
+3. PERMITTED USE (FREE TIER)
+   You may use the Software at no cost for:
+   - Local cryptographic signing and verification
+   - Development, testing, and evaluation
+   - Production use within Free Tier limits
+   
+4. ENTERPRISE FEATURES
+   Enterprise Features require a paid subscription. 
+   See mosscomputing.com/pricing for details.
+
+5. RESTRICTIONS
+   You may NOT:
+   - Copy, modify, merge, publish, distribute, sublicense, or sell the Software
+   - Reverse engineer, decompile, or disassemble the Software
+   - Remove or alter any proprietary notices or labels
+   - Use the Software to create competing products or services
+   - Circumvent any licensing or usage restrictions
+   - Transfer or assign your rights under this license
+
+6. INTELLECTUAL PROPERTY
+   IAMPASS Inc. retains all right, title, and interest in the Software.
+   This license does not grant you any ownership rights.
+
+7. NO WARRANTY
+   THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS 
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, 
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+8. LIMITATION OF LIABILITY
+   IN NO EVENT SHALL IAMPASS INC. BE LIABLE FOR ANY INDIRECT, INCIDENTAL, 
+   SPECIAL, CONSEQUENTIAL, OR PUNITIVE DAMAGES. TOTAL LIABILITY SHALL NOT 
+   EXCEED THE AMOUNTS PAID BY YOU IN THE TWELVE MONTHS PRECEDING THE CLAIM.
+
+9. TERMINATION
+   This license terminates automatically if you breach any term. Upon 
+   termination, you must cease all use and destroy all copies.
+
+10. GOVERNING LAW
+    This agreement is governed by the laws of the State of Delaware, USA.
+
+For licensing inquiries: legal@iampass.com
+For sales: sales@iampass.com
+Website: https://mosscomputing.com

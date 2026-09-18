@@ -1,0 +1,2 @@
+[console_scripts]
+moss = moss.cli:main
