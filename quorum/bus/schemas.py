@@ -7,7 +7,8 @@ schema integrity across the multi-agent boundary.
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import time
 import uuid
 
 
@@ -47,8 +48,9 @@ class Claim(BaseModel):
     content: str = Field(max_length=4096)
     status: ClaimStatus = "active"
     supersedes: Optional[str] = None  # ID of claim this supersedes
-    last_heartbeat: datetime = Field(default_factory=datetime.utcnow)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    ts_monotonic: float = Field(default_factory=time.monotonic)
+    last_heartbeat: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     reap_reason: Optional[ReapReason] = None
 
 
@@ -71,7 +73,7 @@ class Finding(BaseModel):
     content: str = Field(max_length=8192)
     sources: list[str] = Field(default_factory=list)
     supersedes: Optional[str] = None  # ID of finding this supersedes
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Conflict(BaseModel):
@@ -91,7 +93,7 @@ class Conflict(BaseModel):
     finding_b_id: str
     similarity_score: float
     adjudicator_verdict: Optional[str] = None  # LLM summary, never auto-resolves
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved: bool = False
 
 
@@ -108,3 +110,4 @@ class SenseResult(BaseModel):
     query: str
     results: list[dict]  # raw chromadb results
     latency_ms: float
+

@@ -52,3 +52,26 @@ def test_harness_reset():
     # Now asserting external must fail again
     with pytest.raises(StepOrderViolation):
         harness.assert_can_call_external()
+
+
+def test_duplicate_claim_blocks_external_call():
+    """When a claim is marked as duplicate, the step transitions to DONE and blocks external calls."""
+    harness = StepHarness(participant_id="agent-test", run_id="run-test")
+    harness.mark_sensed()
+    harness.mark_claim_result(is_duplicate=True)
+
+    # Calling external from duplicate / DONE state must raise StepOrderViolation
+    with pytest.raises(StepOrderViolation):
+        harness.assert_can_call_external()
+
+
+def test_mark_done_without_external_allowed_raises():
+    """Attempting mark_done() directly from INIT or SENSED must raise StepOrderViolation."""
+    harness = StepHarness(participant_id="agent-test", run_id="run-test")
+    with pytest.raises(StepOrderViolation):
+        harness.mark_done()
+
+    harness.mark_sensed()
+    with pytest.raises(StepOrderViolation):
+        harness.mark_done()
+

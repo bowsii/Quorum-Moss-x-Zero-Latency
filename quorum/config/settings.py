@@ -6,8 +6,10 @@ Centralised configuration loaded from environment variables and an optional
 hard-coded here.
 """
 
-from pydantic import Field
+from typing import Literal
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 
 
 class Settings(BaseSettings):
@@ -98,13 +100,22 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Runtime environment
     # ------------------------------------------------------------------
-    ENVIRONMENT: str = Field(
+    ENVIRONMENT: Literal["development", "test", "staging", "production"] = Field(
         default="development",
         description=(
-            "Runtime environment label (development | staging | production). "
+            "Runtime environment label (development | test | staging | production). "
             "Used to gate hard assertions and debug behaviour."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.ENVIRONMENT == "production":
+            if self.SECRET_KEY == "dev_secret_key_quorum_32bytes_min_jwt_token_development":
+                raise ValueError(
+                    "SECRET_KEY must be overridden with a secure random key when ENVIRONMENT='production'."
+                )
+        return self
 
     # ------------------------------------------------------------------
     # Pydantic-settings configuration
@@ -113,6 +124,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
     )
+
 
 
 # ---------------------------------------------------------------------------

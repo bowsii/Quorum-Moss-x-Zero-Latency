@@ -14,6 +14,12 @@ from typing import Optional
 
 from tavily import AsyncTavilyClient
 
+from agents.coordination_token import (
+    CoordinationToken,
+    UnapprovedExternalWorkError,
+    verify_coordination_capability,
+)
+
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -60,14 +66,20 @@ def get_tavily_client() -> AsyncTavilyClient:
 # ---------------------------------------------------------------------------
 
 
-async def tavily_search(query: str, max_results: int = 5) -> list[dict]:
+async def tavily_search(
+    query: str,
+    max_results: int = 5,
+    search_depth: str = "basic",
+    coordination_token: Optional[CoordinationToken] = None,
+) -> list[dict]:
     """Search the web via Tavily and return structured results.
 
     Each result dict contains at minimum:
     ``{"url": str, "title": str, "content": str, "score": float}``
 
-    The function never raises — all errors are logged and an empty list is
-    returned so callers can proceed without try/except boilerplate.
+    Firewall:
+        Requires a valid CoordinationToken in the execution context or via
+        coordination_token argument. Raises UnapprovedExternalWorkError if unauthorized.
 
     Parameters
     ----------
@@ -75,13 +87,22 @@ async def tavily_search(query: str, max_results: int = 5) -> list[dict]:
         The natural-language search query.
     max_results:
         Maximum number of results to return (default 5).
+    search_depth:
+        "basic" or "advanced".
+    coordination_token:
+        Optional explicit CoordinationToken. If None, resolved from ambient context.
 
     Returns
     -------
     list[dict]
         A list of result dicts, each with ``url``, ``title``, ``content``,
-        and ``score`` keys.  Returns ``[]`` on any failure.
+        and ``score`` keys.  Returns ``[]`` on any transient failure.
     """
+    # ------------------------------------------------------------------
+    # Coordination Firewall Gate Check (HARD REJECT IF UNAUTHORIZED)
+    # ------------------------------------------------------------------
+    verify_coordination_capability(token=coordination_token)
+
     if not query or not query.strip():
         logger.warning("tavily_search called with empty query; returning [].")
         return []

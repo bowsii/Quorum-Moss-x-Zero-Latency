@@ -31,6 +31,7 @@ from bus.moss_client import sense, write_finding
 from bus.schemas import Finding, ParticipantType
 from inference.router import inference_router
 from search.tavily_client import tavily_search
+from agents.coordination_token import bound_coordination_token
 from config.settings import settings
 
 log = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ class LiteratureResearcher(BaseAgent):
         -------
         dict
             ``{'done': True, 'finding_id': str}`` on success, or
+            ``{'done': True, 'absorbed': True, ...}`` on duplicate absorption, or
             ``{'done': False, 'error': str}`` on a recoverable failure.
         """
         run_id: str = context["run_id"]
@@ -116,68 +118,84 @@ class LiteratureResearcher(BaseAgent):
             f"[LiteratureResearcher] Performing academic literature search "
             f"for: {question[:200]}"
         )
-        await self._make_claim(claim_content)
-        harness.mark_claimed()
+        claim, decision = await self.claim_with_decision(claim_content, harness)
+
+        if decision.is_duplicate:
+            log.info(
+                "[%s] Claim absorbed (%s, existing_claim=%s, existing_finding=%s) — skipping external work.",
+                self.agent_id,
+                decision.reason,
+                decision.existing_claim_id,
+                decision.existing_finding_id,
+            )
+            return {
+                "done": True,
+                "absorbed": True,
+                "existing_claim_id": decision.existing_claim_id,
+                "existing_finding_id": decision.existing_finding_id,
+                "reason": decision.reason,
+            }
 
         # ----------------------------------------------------------------
         # 3. GATE — external calls are now permitted
         # ----------------------------------------------------------------
-        harness.assert_can_call_external()
+        token = harness.assert_can_call_external()
 
-        # ----------------------------------------------------------------
-        # 4. tavily_search() — retrieve academic / literature sources
-        # ----------------------------------------------------------------
-        search_query = _SEARCH_TEMPLATE.format(question=question)
-        log.info("[%s] Running Tavily search: %r", self.agent_id, search_query[:100])
+        with bound_coordination_token(token):
+            # ------------------------------------------------------------
+            # 4. tavily_search() — retrieve academic / literature sources
+            # ------------------------------------------------------------
+            search_query = _SEARCH_TEMPLATE.format(question=question)
+            log.info("[%s] Running Tavily search: %r", self.agent_id, search_query[:100])
 
-        try:
-            search_results: list[dict] = await tavily_search(
-                query=search_query,
-                max_results=8,
-                search_depth="advanced",
+            try:
+                search_results: list[dict] = await tavily_search(
+                    query=search_query,
+                    max_results=8,
+                    search_depth="advanced",
+                )
+            except Exception:
+                log.exception("[%s] Tavily search failed.", self.agent_id)
+                return {"done": False, "error": "tavily_search failed"}
+
+            # ------------------------------------------------------------
+            # 5. inference_router.complete() — synthesise results
+            # ------------------------------------------------------------
+            formatted_results = _format_search_results(search_results)
+            synthesis_prompt = _SYNTHESIS_PROMPT.format(
+                question=question,
+                search_results=formatted_results,
             )
-        except Exception:
-            log.exception("[%s] Tavily search failed.", self.agent_id)
-            return {"done": False, "error": "tavily_search failed"}
 
-        # ----------------------------------------------------------------
-        # 5. inference_router.complete() — synthesise results
-        # ----------------------------------------------------------------
-        formatted_results = _format_search_results(search_results)
-        synthesis_prompt = _SYNTHESIS_PROMPT.format(
-            question=question,
-            search_results=formatted_results,
-        )
+            log.info("[%s] Requesting synthesis from inference router.", self.agent_id)
+            try:
+                synthesis: str = await inference_router.complete(
+                    prompt=synthesis_prompt,
+                    max_tokens=700,
+                )
+            except Exception:
+                log.exception("[%s] Inference router failed.", self.agent_id)
+                return {"done": False, "error": "inference_router.complete failed"}
 
-        log.info("[%s] Requesting synthesis from inference router.", self.agent_id)
-        try:
-            synthesis: str = await inference_router.complete(
-                prompt=synthesis_prompt,
-                max_tokens=700,
+            # ------------------------------------------------------------
+            # 6. write_finding() — publish to findings namespace
+            # ------------------------------------------------------------
+            sources: list[str] = _extract_sources(search_results)
+            finding = Finding(
+                run_id=run_id,
+                participant_id=self.agent_id,
+                participant_type=self.participant_type,
+                title=f"Literature Review: {question[:100]}",
+                content=synthesis,
+                sources=sources,
             )
-        except Exception:
-            log.exception("[%s] Inference router failed.", self.agent_id)
-            return {"done": False, "error": "inference_router.complete failed"}
 
-        # ----------------------------------------------------------------
-        # 6. write_finding() — publish to findings namespace
-        # ----------------------------------------------------------------
-        sources: list[str] = _extract_sources(search_results)
-        finding = Finding(
-            run_id=run_id,
-            participant_id=self.agent_id,
-            participant_type=self.participant_type,
-            title=f"Literature Review: {question[:100]}",
-            content=synthesis,
-            sources=sources,
-        )
-
-        log.info("[%s] Writing finding %s.", self.agent_id, finding.id)
-        try:
-            await write_finding(finding)
-        except Exception:
-            log.exception("[%s] write_finding failed.", self.agent_id)
-            return {"done": False, "error": "write_finding failed"}
+            log.info("[%s] Writing finding %s.", self.agent_id, finding.id)
+            try:
+                await write_finding(finding)
+            except Exception:
+                log.exception("[%s] write_finding failed.", self.agent_id)
+                return {"done": False, "error": "write_finding failed"}
 
         harness.mark_done()
         log.info("[%s] Step complete — finding published: %s", self.agent_id, finding.id)

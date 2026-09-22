@@ -42,7 +42,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from bus.moss_client import sense, write_claim, heartbeat
+from bus.moss_client import sense, write_claim, heartbeat, resolve_and_claim
+from bus.claim_engine import ClaimDecision
 from bus.schemas import Claim, ParticipantType, SenseResult
 from agents.harness import StepHarness
 from config.settings import settings
@@ -256,6 +257,33 @@ class BaseAgent(ABC):
     # ------------------------------------------------------------------
     # Claim helpers
     # ------------------------------------------------------------------
+
+    async def claim_with_decision(
+        self,
+        content: str,
+        harness: StepHarness,
+        dedup_threshold: float = 0.85,
+    ) -> tuple[Claim, ClaimDecision]:
+        """Submit a claim through the authoritative ClaimDecisionEngine under harness.
+
+        If duplicate or completed finding exists, harness transitions to DONE (blocking external work).
+        If winner, harness transitions to EXTERNAL_ALLOWED and issues CoordinationToken.
+        """
+        claim = Claim(
+            run_id=self.run_id,
+            participant_id=self.agent_id,
+            participant_type=self.participant_type,
+            content=content,
+        )
+        decision = await resolve_and_claim(claim, dedup_threshold=dedup_threshold)
+        if decision.is_duplicate:
+            harness.mark_claim_result(is_duplicate=True)
+            self.current_claim_id = None
+        else:
+            self.current_claim_id = claim.id
+            harness.mark_claim_result(is_duplicate=False, claim=claim)
+
+        return claim, decision
 
     async def _make_claim(self, content: str) -> Claim:
         """Build, write, and return a :class:`~bus.schemas.Claim`.

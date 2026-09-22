@@ -35,6 +35,13 @@ from functools import wraps
 
 from config.settings import settings
 
+from datetime import datetime, timedelta, timezone
+from agents.coordination_token import (
+    CoordinationToken,
+    UnapprovedExternalWorkError,
+    bound_coordination_token,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -70,8 +77,7 @@ class StepState(Enum):
 class StepOrderViolation(RuntimeError):
     """Raised when the sense → claim → external ordering contract is violated.
 
-    Only raised in ``development`` and ``test`` environments.  In production
-    the violation is logged at ERROR level but execution continues.
+    Hard fail-closed: raised in all environments (development, test, and production).
     """
 
 
@@ -97,6 +103,7 @@ class StepHarness:
         self.participant_id = participant_id
         self.run_id = run_id
         self._state: StepState = StepState.INIT
+        self.current_token: Optional[CoordinationToken] = None
 
     # ------------------------------------------------------------------
     # State transitions
@@ -112,25 +119,76 @@ class StepHarness:
             self.run_id,
         )
 
-    def mark_claimed(self) -> None:
-        """Transition SENSED → CLAIMED → EXTERNAL_ALLOWED.
+    def mark_claim_result(
+        self,
+        *,
+        is_duplicate: bool = False,
+        claim: Any = None,
+        claim_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        ttl_seconds: Optional[float] = None,
+    ) -> Optional[CoordinationToken]:
+        """Record the outcome of claim().
 
-        Both transitions are atomic: calling this method immediately opens
-        the external-call gate.  Must be called immediately after claim()
-        resolves.
+        If is_duplicate is True, the agent absorbed an existing finding or
+        claim and must not execute subsequent external calls; transitions to DONE.
+        If is_duplicate is False, transitions to EXTERNAL_ALLOWED, opening the gate
+        and issuing an explicit CoordinationToken capability.
         """
         self.assert_can_claim()
-        self._state = StepState.CLAIMED
-        self._state = StepState.EXTERNAL_ALLOWED
-        log.debug(
-            "[harness] %s run=%s SENSED → EXTERNAL_ALLOWED",
-            self.participant_id,
-            self.run_id,
-        )
+        if is_duplicate:
+            self._state = StepState.DONE
+            self.current_token = None
+            log.debug(
+                "[harness] %s run=%s SENSED → DONE (duplicate claim absorbed)",
+                self.participant_id,
+                self.run_id,
+            )
+            return None
+        else:
+            self._state = StepState.EXTERNAL_ALLOWED
+            cid = getattr(claim, "id", None) or claim_id or f"claim-{self.participant_id}"
+            tid = task_id or f"task-{self.run_id}-{self.participant_id}"
+            now = datetime.now(timezone.utc)
+            ttl = ttl_seconds if ttl_seconds is not None else float(settings.HEARTBEAT_TTL_SECONDS)
+            expires = now + timedelta(seconds=ttl)
+            version = str(getattr(claim, "ts_monotonic", now.timestamp()))
+
+            self.current_token = CoordinationToken(
+                run_id=self.run_id,
+                task_id=tid,
+                claim_id=cid,
+                owner_id=self.participant_id,
+                version=version,
+                issued_at=now,
+                expires_at=expires,
+                status="active",
+            )
+            log.debug(
+                "[harness] %s run=%s SENSED → EXTERNAL_ALLOWED (claim %s authorized)",
+                self.participant_id,
+                self.run_id,
+                cid,
+            )
+            return self.current_token
+
+    def mark_claimed(
+        self,
+        claim: Any = None,
+        claim_id: Optional[str] = None,
+    ) -> Optional[CoordinationToken]:
+        """Backward-compatible alias for mark_claim_result(is_duplicate=False)."""
+        return self.mark_claim_result(is_duplicate=False, claim=claim, claim_id=claim_id)
 
     def mark_done(self) -> None:
-        """Transition to DONE.  Should be called at the end of a step."""
+        """Transition to DONE. Must only be called after external work completed (EXTERNAL_ALLOWED)."""
+        self._enforce(
+            self._state in (StepState.EXTERNAL_ALLOWED, StepState.DONE),
+            f"[{self.participant_id}] mark_done() called in state {self._state.name}; "
+            "expected EXTERNAL_ALLOWED.",
+        )
         self._state = StepState.DONE
+        self.current_token = None
         log.debug(
             "[harness] %s run=%s → DONE",
             self.participant_id,
@@ -145,6 +203,7 @@ class StepHarness:
         run loop).
         """
         self._state = StepState.INIT
+        self.current_token = None
         log.debug(
             "[harness] %s run=%s reset → INIT",
             self.participant_id,
@@ -161,7 +220,7 @@ class StepHarness:
         Raises
         ------
         StepOrderViolation
-            In dev/test when called after the step has already been sensed.
+            When called after the step has already been sensed.
         """
         self._enforce(
             self._state == StepState.INIT,
@@ -175,7 +234,7 @@ class StepHarness:
         Raises
         ------
         StepOrderViolation
-            In dev/test when claim() is called without a prior sense().
+            When claim() is called without a prior sense().
         """
         self._enforce(
             self._state == StepState.SENSED,
@@ -183,50 +242,62 @@ class StepHarness:
             "sense() must complete before claim() (expected SENSED).",
         )
 
-    def assert_can_call_external(self) -> None:
-        """Assert that an external call is permitted (state must be EXTERNAL_ALLOWED or DONE).
+    def assert_can_call_external(self) -> CoordinationToken:
+        """Assert that an external call is permitted (state must be EXTERNAL_ALLOWED).
 
         This is the primary gate that prevents agents from calling
-        ``inference_router`` or ``tavily_client`` before ``claim()`` resolves.
+        ``inference_router`` or ``tavily_client`` before ``claim()`` resolves,
+        or after duplicate claim absorption / step completion.
+
+        Returns
+        -------
+        CoordinationToken
+            The active coordination capability bound to this claim.
 
         Raises
         ------
         StepOrderViolation
-            In dev/test when an external call is attempted without a prior claim.
+            When an external call is attempted in an invalid state.
+        UnapprovedExternalWorkError
+            When the coordination capability has expired or is revoked.
         """
-        allowed = self._state in (StepState.EXTERNAL_ALLOWED, StepState.DONE)
+        allowed = self._state == StepState.EXTERNAL_ALLOWED
         self._enforce(
             allowed,
             f"[{self.participant_id}] External call attempted in state {self._state.name}; "
-            "claim() must resolve before any external IO (inference/search). "
-            "Call mark_claimed() after write_claim() succeeds.",
+            "claim() must resolve as non-duplicate before any external IO (inference/search).",
         )
+
+        if self.current_token is None or not self.current_token.is_valid():
+            exp_str = self.current_token.expires_at.isoformat() if self.current_token else "none"
+            status_str = self.current_token.status if self.current_token else "missing"
+            raise UnapprovedExternalWorkError(
+                f"[{self.participant_id}] External call attempted with invalid/expired coordination capability: "
+                f"status={status_str}, expires_at={exp_str}."
+            )
+
+        return self.current_token
 
     # ------------------------------------------------------------------
     # Internal enforcement
     # ------------------------------------------------------------------
 
     def _enforce(self, condition: bool, message: str) -> None:
-        """Raise or log based on the current environment.
+        """Fail closed in all environments.
 
         Parameters
         ----------
         condition:
             When ``True`` the contract is satisfied — nothing happens.
-            When ``False`` in dev/test, :class:`StepOrderViolation` is raised.
-            When ``False`` in production, the violation is logged at ERROR.
+            When ``False``, :class:`StepOrderViolation` is raised immediately.
         message:
             Human-readable description of the violation.
         """
         if condition:
             return
 
-        env = settings.ENVIRONMENT.lower()
-        if env in ("development", "test"):
-            raise StepOrderViolation(message)
-        else:
-            # Production: log and survive — but this is a bug, investigate it.
-            log.error("[harness:VIOLATION] %s", message)
+        log.error("[harness:VIOLATION] %s", message)
+        raise StepOrderViolation(message)
 
     # ------------------------------------------------------------------
     # Properties
@@ -290,8 +361,9 @@ def step_guard(harness_attr: str = "harness") -> Callable:
         @wraps(fn)
         async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             harness: StepHarness = getattr(self, harness_attr)
-            harness.assert_can_call_external()
-            return await fn(self, *args, **kwargs)
+            token = harness.assert_can_call_external()
+            with bound_coordination_token(token):
+                return await fn(self, *args, **kwargs)
 
         return wrapper
 

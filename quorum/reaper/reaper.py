@@ -34,20 +34,22 @@ class Reaper:
     """Async heartbeat-TTL scanner that reaps stale claims.
 
     The reaper runs as an infinite coroutine (call ``await reaper.run()`` inside
-    a task).  On each iteration it:
+    a task). On each iteration it:
 
     1. Fetches all ``active`` claims from ChromaDB.
     2. Checks whether ``last_heartbeat`` is older than ``HEARTBEAT_TTL_SECONDS``.
     3. Updates expired claims to ``status="reaped"`` with
        ``reap_reason="heartbeat_timeout"``.
-
-    Attributes:
-        TTL: Claim lifetime in seconds (from settings).
-        scan_interval: How often (seconds) to poll (from settings).
     """
 
-    TTL: int = settings.HEARTBEAT_TTL_SECONDS
-    scan_interval: int = settings.REAPER_SCAN_INTERVAL_SECONDS
+    def __init__(self, ttl: int | None = None, scan_interval: int | None = None) -> None:
+        self.ttl = ttl if ttl is not None else settings.HEARTBEAT_TTL_SECONDS
+        self.scan_interval = scan_interval if scan_interval is not None else settings.REAPER_SCAN_INTERVAL_SECONDS
+
+    @property
+    def TTL(self) -> int:
+        """Backward-compatible uppercase alias for self.ttl."""
+        return self.ttl
 
     # ------------------------------------------------------------------
     # Core scan
@@ -61,12 +63,9 @@ class Reaper:
         """
         collection = get_claims_namespace()
         now = datetime.now(tz=timezone.utc)
-        deadline: datetime = now - timedelta(seconds=self.TTL)
-        deadline_iso = deadline.isoformat()
+        deadline: datetime = now - timedelta(seconds=self.ttl)
 
-        # Fetch all active claims.  ChromaDB's metadata filtering is limited;
-        # we retrieve all active docs and filter in Python for maximum
-        # correctness regardless of ChromaDB version.
+        # Fetch all active claims.
         try:
             result = collection.get(
                 where={"status": "active"},
@@ -85,7 +84,6 @@ class Reaper:
             last_hb_raw: str | None = meta.get("last_heartbeat")
 
             if last_hb_raw is None:
-                # No heartbeat recorded — treat as expired immediately.
                 logger.warning(
                     "Reaper: claim %s has no last_heartbeat; reaping.", claim_id
                 )
@@ -95,7 +93,6 @@ class Reaper:
 
             try:
                 last_hb = datetime.fromisoformat(last_hb_raw)
-                # Ensure timezone-aware for comparison
                 if last_hb.tzinfo is None:
                     last_hb = last_hb.replace(tzinfo=timezone.utc)
             except ValueError:
@@ -117,26 +114,19 @@ class Reaper:
     async def reap_claim(self, claim_id: str, doc_id: str) -> None:
         """Mark a single claim as reaped in ChromaDB.
 
-        Updates the claim's metadata in-place:
-        - ``status`` → ``"reaped"``
-        - ``reap_reason`` → ``"heartbeat_timeout"``
-        - ``reaped_at`` → current UTC ISO timestamp (for observability)
+        Uses update_claim_status from bus.moss_client to ensure thread-safe
+        mutation under _write_lock without clobbering other metadata.
 
         Args:
             claim_id: Logical claim identifier (stored in metadata).
-            doc_id: ChromaDB document ID (used for the ``update`` call).
+            doc_id: ChromaDB document ID.
         """
-        collection = get_claims_namespace()
+        from bus.moss_client import update_claim_status
         try:
-            collection.update(
-                ids=[doc_id],
-                metadatas=[
-                    {
-                        "status": "reaped",
-                        "reap_reason": "heartbeat_timeout",
-                        "reaped_at": datetime.now(tz=timezone.utc).isoformat(),
-                    }
-                ],
+            await update_claim_status(
+                claim_id=doc_id,
+                status="reaped",
+                reap_reason="heartbeat_timeout",
             )
             logger.info("Reaped claim %s reason=heartbeat_timeout", claim_id)
         except Exception as exc:
@@ -152,15 +142,10 @@ class Reaper:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Run the reaper loop forever, scanning every ``scan_interval`` seconds.
-
-        All exceptions inside the scan are caught and logged so that a single
-        bad iteration cannot kill the coroutine.  The loop continues until the
-        task is cancelled externally.
-        """
+        """Run the reaper loop forever, scanning every ``scan_interval`` seconds."""
         logger.info(
             "Reaper started: TTL=%ds scan_interval=%ds",
-            self.TTL,
+            self.ttl,
             self.scan_interval,
         )
         while True:
@@ -186,3 +171,4 @@ class Reaper:
 # ---------------------------------------------------------------------------
 
 reaper = Reaper()
+

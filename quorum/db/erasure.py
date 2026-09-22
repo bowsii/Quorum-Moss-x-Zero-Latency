@@ -89,17 +89,20 @@ async def erase_run(
     }
 
     # ------------------------------------------------------------------
-    # 1 & 2. Purge ChromaDB vector stores
+    # 1 & 2. Purge ChromaDB vector stores (fail fast before SQLite)
     # ------------------------------------------------------------------
     for collection, count_key in (
         (moss_claims_collection, "claims_deleted"),
         (moss_findings_collection, "findings_deleted"),
     ):
-        result = collection.get(where={"run_id": run_id})
-        doc_ids: list[str] = result.get("ids", [])
-        if doc_ids:
-            collection.delete(ids=doc_ids)
-        erasure_counts[count_key] = len(doc_ids)
+        try:
+            result = collection.get(where={"run_id": run_id})
+            doc_ids: list[str] = result.get("ids", [])
+            if doc_ids:
+                collection.delete(ids=doc_ids)
+            erasure_counts[count_key] = len(doc_ids)
+        except Exception as e:
+            raise RuntimeError(f"ChromaDB erasure failed for {count_key}: {e}") from e
 
     # ------------------------------------------------------------------
     # 3 & 4. Relational erasure inside an explicit SQLite transaction
@@ -108,16 +111,22 @@ async def erase_run(
 
     await db.execute("BEGIN")
     try:
-        # 4a. Collect span_ids from replay_logs BEFORE deletion so we can
-        #     build tombstone rows.
+        # 4a. Collect span_ids from replay_logs BEFORE deletion.
+        # Extract the real span_id from JSON payload if present, falling back to row ID.
         cursor = await db.execute(
-            "SELECT id FROM replay_logs WHERE run_id = ?",
+            "SELECT id, payload FROM replay_logs WHERE run_id = ?",
             (run_id,),
         )
         replay_rows = await cursor.fetchall()
-        # Each replay_log id is used as the span_id surrogate (the replay log
-        # row IS the telemetry span anchor in Quorum's schema).
-        span_ids: list[str] = [str(row[0]) for row in replay_rows]
+        span_ids: list[str] = []
+        for row in replay_rows:
+            try:
+                import json
+                payload_data = json.loads(row[1]) if row[1] else {}
+                real_span = payload_data.get("span_id")
+                span_ids.append(str(real_span if real_span else row[0]))
+            except Exception:
+                span_ids.append(str(row[0]))
 
         # 3a. Delete child tables first to satisfy FK constraints.
         cursor = await db.execute(
@@ -145,7 +154,13 @@ async def erase_run(
                 """,
                 tombstone_rows,
             )
-            erasure_counts["tombstones_inserted"] = len(span_ids)
+            # Count the actual tombstones verified in the table for this run
+            t_cur = await db.execute(
+                "SELECT COUNT(*) FROM telemetry_tombstones WHERE run_id = ?",
+                (run_id,),
+            )
+            t_row = await t_cur.fetchone()
+            erasure_counts["tombstones_inserted"] = t_row[0] if t_row else len(span_ids)
 
         # 3b. Delete the parent run row.
         cursor = await db.execute(
@@ -161,3 +176,4 @@ async def erase_run(
         raise
 
     return erasure_counts
+

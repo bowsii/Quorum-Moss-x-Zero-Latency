@@ -21,6 +21,9 @@ from adjudicator.conflict_tray import conflict_tray
 from inference.router import inference_router
 from bus.namespaces import get_findings_namespace
 
+from datetime import datetime, timezone, timedelta
+from agents.coordination_token import CoordinationToken, bound_coordination_token
+
 logger = logging.getLogger(__name__)
 
 SIMILARITY_THRESHOLD = 0.85
@@ -138,8 +141,21 @@ class Adjudicator:
         )
         messages = [{"role": "user", "content": prompt}]
 
+        now = datetime.now(timezone.utc)
+        token = CoordinationToken(
+            run_id=conflict.run_id,
+            task_id=f"adjudicate-{conflict.id}",
+            claim_id=f"conflict-{conflict.id}",
+            owner_id="adjudicator",
+            version="1.0",
+            issued_at=now,
+            expires_at=now + timedelta(seconds=60),
+            status="active",
+        )
+
         try:
-            verdict = await inference_router.complete(messages=messages)
+            with bound_coordination_token(token):
+                verdict = await inference_router.complete(messages=messages)
             logger.info("Adjudicator: verdict generated for conflict %s", conflict.id)
             return verdict.strip()
         except Exception as exc:
@@ -191,7 +207,7 @@ class Adjudicator:
                         # Retrieve content of finding B for verdict generation
                         try:
                             b_result = collection.get(
-                                where={"finding_id": conflict.finding_b_id},
+                                ids=[conflict.finding_b_id],
                                 include=["documents"],
                             )
                             b_docs: list[str] = b_result.get("documents") or []
@@ -204,6 +220,7 @@ class Adjudicator:
                             content_a=document,
                             content_b=content_b,
                         )
+
                         conflict_with_verdict = conflict.model_copy(
                             update={"adjudicator_verdict": verdict}
                         )

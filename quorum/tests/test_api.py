@@ -87,3 +87,30 @@ async def test_bus_sense_and_claim(auth_headers):
         data = sense_resp.json()
         assert "results" in data
         assert "latency_ms" in data
+
+
+@pytest.mark.asyncio
+async def test_atomic_claim_deduplication():
+    """Verify claim(..., atomic=True) prevents concurrent duplicate claims under _claims_lock."""
+    from bus.moss_client import claim
+
+    c1, is_dup1 = await claim(
+        run_id="run-atomic-test",
+        participant_id="agent-1",
+        participant_type="agent",
+        content="Decentralized consensus mechanisms in multi-agent swarms",
+        atomic=True,
+    )
+    assert is_dup1 is False
+
+    # Second near-identical claim should be detected as duplicate within lock
+    c2, is_dup2 = await claim(
+        run_id="run-atomic-test",
+        participant_id="agent-2",
+        participant_type="agent",
+        content="Decentralized consensus mechanisms in multi-agent swarms",
+        atomic=True,
+    )
+    assert is_dup2 is True
+    assert c2.id == c1.id
+

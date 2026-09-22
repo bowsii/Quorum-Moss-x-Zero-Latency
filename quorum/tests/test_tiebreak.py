@@ -91,3 +91,72 @@ def test_same_tier_tiebreak_by_timestamp_and_id():
     # Earlier timestamp wins
     assert should_claim_win(challenger=agent_a, incumbent=agent_b) is True
     assert should_claim_win(challenger=agent_b, incumbent=agent_a) is False
+
+
+def test_agent_wins_if_claimed_well_before_epsilon_window():
+    """A human cannot retroactively steal work claimed outside the 50ms epsilon window."""
+    t0 = datetime.now(timezone.utc)
+    agent_incumbent = Claim(
+        run_id="run-1",
+        participant_id="agent-1",
+        participant_type="agent",
+        content="Agent hypothesis",
+        created_at=t0,
+    )
+    human_challenger = Claim(
+        run_id="run-1",
+        participant_id="human-alice",
+        participant_type="human",
+        content="Human guidance",
+        created_at=t0 + timedelta(seconds=5),  # well outside 50ms
+    )
+
+    # Human challenger arrives 5s later -> agent incumbent must WIN (challenger should NOT win)
+    assert should_claim_win(challenger=human_challenger, incumbent=agent_incumbent) is False
+
+
+def test_same_type_within_epsilon_falls_through_to_monotonic():
+    """When both participants are the same type within epsilon, earlier timestamp decides."""
+    agent_1 = Claim(
+        run_id="run-1",
+        participant_id="agent-1",
+        participant_type="agent",
+        content="First claim",
+        ts_monotonic=100.0,
+    )
+    agent_2 = Claim(
+        run_id="run-1",
+        participant_id="agent-2",
+        participant_type="agent",
+        content="Second claim",
+        ts_monotonic=100.020,  # 20ms later (within 50ms epsilon)
+    )
+
+    # Agent 1 was earlier, so challenger agent 2 loses
+    assert should_claim_win(challenger=agent_2, incumbent=agent_1) is False
+    # Agent 1 challenging agent 2 wins
+    assert should_claim_win(challenger=agent_1, incumbent=agent_2) is True
+
+
+def test_default_factory_timezone_aware_and_monotonic():
+    """Regression test: Claim created with default factories should have timezone-aware timestamps and ts_monotonic."""
+    claim1 = Claim(
+        run_id="run-1",
+        participant_id="agent-1",
+        participant_type="agent",
+        content="Default claim 1",
+    )
+    claim2 = Claim(
+        run_id="run-1",
+        participant_id="agent-2",
+        participant_type="agent",
+        content="Default claim 2",
+    )
+
+    assert claim1.created_at.tzinfo is not None
+    assert claim1.last_heartbeat.tzinfo is not None
+    assert isinstance(claim1.ts_monotonic, float)
+    # Comparison must not raise TypeError (naive vs aware)
+    result = should_claim_win(challenger=claim2, incumbent=claim1)
+    assert isinstance(result, bool)
+

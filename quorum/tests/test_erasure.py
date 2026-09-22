@@ -100,3 +100,54 @@ async def test_full_erasure_targets_all_three_layers(tmp_path):
     assert result["runs_deleted"] == 1
     assert result["claims_deleted"] >= 1
     assert result["findings_deleted"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_erasure_tombstone_count_and_retryability(tmp_path):
+    """Verify multiple spans in replay logs produce exact tombstone counts, and erase_run is safely retryable."""
+    db_file = str(tmp_path / "test_quorum_retry.db")
+    await init_db(db_path=db_file)
+
+    run_id = f"test-run-retry-{uuid.uuid4()}"
+    claims_col = get_claims_namespace()
+    findings_col = get_findings_namespace()
+
+    async with aiosqlite.connect(db_file) as db:
+        await db.execute(
+            "INSERT INTO runs (id, question, started_at, status) VALUES (?, ?, ?, ?)",
+            (run_id, "Erasure retry question", "2026-09-18T00:00:00Z", "completed"),
+        )
+        # Insert 3 distinct replay logs with real span_ids
+        for idx in range(3):
+            await db.execute(
+                "INSERT INTO replay_logs (run_id, step_index, participant_id, action, payload, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, idx, "agent-1", "action", f'{{"span_id": "span-distinct-{idx}"}}', "2026-09-18T00:00:00Z"),
+            )
+        await db.commit()
+
+        # First erase run
+        res1 = await erase_run(
+            run_id=run_id,
+            moss_claims_collection=claims_col,
+            moss_findings_collection=findings_col,
+            db=db,
+        )
+        assert res1["runs_deleted"] == 1
+        assert res1["replay_logs_deleted"] == 3
+        assert res1["tombstones_inserted"] == 3
+
+        # Second erase run (retry) - should safely succeed as an idempotent operation
+        res2 = await erase_run(
+            run_id=run_id,
+            moss_claims_collection=claims_col,
+            moss_findings_collection=findings_col,
+            db=db,
+        )
+        assert res2["runs_deleted"] == 0
+        assert res2["claims_deleted"] == 0
+        assert res2["findings_deleted"] == 0
+        assert res2["consent_events_deleted"] == 0
+        assert res2["replay_logs_deleted"] == 0
+        assert res2["tombstones_inserted"] == 0
+
+

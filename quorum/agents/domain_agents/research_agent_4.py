@@ -35,6 +35,7 @@ from agents.harness import StepHarness
 from bus.moss_client import sense, write_finding
 from bus.schemas import Finding, ParticipantType
 from inference.router import inference_router
+from agents.coordination_token import bound_coordination_token
 from config.settings import settings
 
 log = logging.getLogger(__name__)
@@ -172,60 +173,76 @@ class SynthesisBuilder(BaseAgent):
             f"[SynthesisBuilder] Building consensus from {len(all_findings)} "
             f"findings for: {question[:200]}"
         )
-        await self._make_claim(claim_content)
-        harness.mark_claimed()
+        claim, decision = await self.claim_with_decision(claim_content, harness)
+
+        if decision.is_duplicate:
+            log.info(
+                "[%s] Claim absorbed (%s, existing_claim=%s, existing_finding=%s) — skipping external work.",
+                self.agent_id,
+                decision.reason,
+                decision.existing_claim_id,
+                decision.existing_finding_id,
+            )
+            return {
+                "done": True,
+                "absorbed": True,
+                "existing_claim_id": decision.existing_claim_id,
+                "existing_finding_id": decision.existing_finding_id,
+                "reason": decision.reason,
+            }
 
         # ----------------------------------------------------------------
         # 3. GATE — external calls (inference) are now permitted
         # ----------------------------------------------------------------
-        harness.assert_can_call_external()
+        token = harness.assert_can_call_external()
 
-        # ----------------------------------------------------------------
-        # 4-5. inference_router.complete() — synthesise the consensus view
-        #       (No Tavily search — works exclusively from board findings.)
-        # ----------------------------------------------------------------
-        formatted_findings = _format_findings(all_findings)
-        synthesis_prompt = _SYNTHESIS_PROMPT.format(
-            question=question,
-            all_findings=formatted_findings,
-        )
-
-        log.info(
-            "[%s] Requesting consensus synthesis from inference router "
-            "(input: %d findings).",
-            self.agent_id,
-            len(all_findings),
-        )
-        try:
-            synthesis: str = await inference_router.complete(
-                prompt=synthesis_prompt,
-                max_tokens=900,
+        with bound_coordination_token(token):
+            # ------------------------------------------------------------
+            # 4-5. inference_router.complete() — synthesise the consensus view
+            #       (No Tavily search — works exclusively from board findings.)
+            # ------------------------------------------------------------
+            formatted_findings = _format_findings(all_findings)
+            synthesis_prompt = _SYNTHESIS_PROMPT.format(
+                question=question,
+                all_findings=formatted_findings,
             )
-        except Exception:
-            log.exception("[%s] Inference router failed.", self.agent_id)
-            return {"done": False, "error": "inference_router.complete failed"}
 
-        # ----------------------------------------------------------------
-        # 6. write_finding() — publish the consensus finding
-        # ----------------------------------------------------------------
-        # Collect all source URLs already cited by prior findings.
-        all_sources: list[str] = _collect_sources(all_findings)
+            log.info(
+                "[%s] Requesting consensus synthesis from inference router "
+                "(input: %d findings).",
+                self.agent_id,
+                len(all_findings),
+            )
+            try:
+                synthesis: str = await inference_router.complete(
+                    prompt=synthesis_prompt,
+                    max_tokens=900,
+                )
+            except Exception:
+                log.exception("[%s] Inference router failed.", self.agent_id)
+                return {"done": False, "error": "inference_router.complete failed"}
 
-        finding = Finding(
-            run_id=run_id,
-            participant_id=self.agent_id,
-            participant_type=self.participant_type,
-            title=f"[SYNTHESIS] Consensus on: {question[:80]}",
-            content=synthesis,
-            sources=all_sources,
-        )
+            # ------------------------------------------------------------
+            # 6. write_finding() — publish the consensus finding
+            # ------------------------------------------------------------
+            # Collect all source URLs already cited by prior findings.
+            all_sources: list[str] = _collect_sources(all_findings)
 
-        log.info("[%s] Writing consensus finding %s.", self.agent_id, finding.id)
-        try:
-            await write_finding(finding)
-        except Exception:
-            log.exception("[%s] write_finding failed.", self.agent_id)
-            return {"done": False, "error": "write_finding failed"}
+            finding = Finding(
+                run_id=run_id,
+                participant_id=self.agent_id,
+                participant_type=self.participant_type,
+                title=f"[SYNTHESIS] Consensus on: {question[:80]}",
+                content=synthesis,
+                sources=all_sources,
+            )
+
+            log.info("[%s] Writing consensus finding %s.", self.agent_id, finding.id)
+            try:
+                await write_finding(finding)
+            except Exception:
+                log.exception("[%s] write_finding failed.", self.agent_id)
+                return {"done": False, "error": "write_finding failed"}
 
         harness.mark_done()
         log.info(
