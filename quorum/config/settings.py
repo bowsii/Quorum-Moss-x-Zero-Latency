@@ -72,6 +72,10 @@ class Settings(BaseSettings):
         default="sqlite+aiosqlite:///./quorum.db",
         description="Async-compatible SQLAlchemy database URL.",
     )
+    POSTGRES_URL: str = Field(
+        default="",
+        description="PostgreSQL connection string for authoritative transactional state (e.g. postgresql://user:pass@localhost:5432/quorum).",
+    )
 
     # ------------------------------------------------------------------
     # ChromaDB namespace identifiers

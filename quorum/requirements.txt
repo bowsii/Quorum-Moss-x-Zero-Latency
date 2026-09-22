@@ -16,6 +16,7 @@ passlib[bcrypt]>=1.7.4
 
 # Database
 aiosqlite>=0.20.0
+asyncpg>=0.29.0
 
 # Semantic index — Moss / ChromaDB (in-process, no HTTP hop)
 chromadb>=0.5.0

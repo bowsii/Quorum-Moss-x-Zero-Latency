@@ -1,193 +1,200 @@
-# Quorum Stage 2 Architecture Design: Durable Cross-Process Coordination
+# Quorum Stage 2 Architecture Design: Authoritative Transactional State
 
 ## 1. Executive Summary & Problem Statement
 
-Stage 1 established an in-process coordination contract (`SENSE → CLAIM → CLAIM VALIDATION → TIEBREAK → EXTERNAL_ALLOWED → EXPENSIVE_EXTERNAL_WORK → PUBLISH_FINDING`) and proved:
-- Exactly-one ownership under 100 concurrent in-process agents.
-- Zero unauthorized calls through the external work firewall (`UnapprovedExternalWorkError`).
-- Hard fail-closed transitions in `StepHarness`.
-
-However, Stage 1's ownership and mutual exclusion relied exclusively on in-memory mechanisms:
-- `_claims_lock` (an `asyncio.Lock` local to a single Python event loop).
-- In-memory `ChromaDB EphemeralClient`.
-- In-memory `ContextVar` coordination token tracking.
-- In-memory Reaper loop scanning volatile Chroma collections.
-
-If two or more independent OS worker processes run concurrently:
-1. `asyncio.Lock` does not synchronize across process boundaries.
-2. Independent processes accessing isolated in-memory Chroma instances cannot detect each other's claims.
-3. A process crash immediately destroys in-flight task leases and claims, leaving tasks unrecoverable.
-4. Duplicate queue messages or concurrent worker deliveries can cause split-brain ownership.
-
-Stage 2 elevates Quorum from an in-process prototype to a **durable, cross-process coordination platform**.
-
----
-
-## 2. State Boundaries & Separation of Concerns
-
-The foundational architectural principle of Stage 2 is the separation of **semantic retrieval** from **transactional authority**:
-
-> **The Semantic Vector Store (Chroma) answers:** *"What existing work or claims are semantically related?"*  
-> **The Transactional Relational Database answers:** *"Who authoritative owns this work, for what duration, and under what version?"*
-
-```
-                       ┌──────────────────────────────────────┐
-                       │           Worker Process             │
-                       └──────────────────┬───────────────────┘
-                                          │
-                         1. Semantic Sense│
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │        Chroma (Semantic Index)       │
-                       │   Returns candidate related claims   │
-                       └──────────────────┬───────────────────┘
-                                          │
-                                          │ 2. Candidates & Work Fingerprint
-                                          ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    Authoritative Relational Database (WAL Mode)                 │
-│                                                                                 │
-│   BEGIN IMMEDIATE Transaction:                                                  │
-│   ├── Check active claims / candidate leases (status = 'active', expires_at > t)│
-│   ├── Evaluate tiebreak & semantic collision                                    │
-│   ├── Insert/Update claim + issue durable claim lease with fencing version v    │
-│   └── Commit (Atomic & durable across all OS processes)                         │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                          │
-                        3. Outbox Event   │
-                                          ▼
-                       ┌──────────────────────────────────────┐
-                       │     Outbox Sync Worker / Retries     │
-                       │  Indexes new claim/finding into      │
-                       │  Chroma for future sense queries     │
-                       └──────────────────────────────────────┘
+Stage 1 established the core Quorum coordination invariant:
+```text
+SENSE → CLAIM → CLAIM VALIDATION / TIEBREAK → EXTERNAL_WORK_ALLOWED → EXPENSIVE_EXTERNAL_WORK → PUBLISH_FINDING
 ```
 
----
+Within a single process and event loop, Stage 1 proved:
+- Exactly-one ownership under a 100-agent race (`1 owner`, `99 absorbed`, `1 external execution`).
+- Zero unauthorized external calls through the external work firewall (`UnapprovedExternalWorkError`).
+- In-process coordination lock protection via `_claims_lock` (`asyncio.Lock`).
 
-## 3. Explicit State Definitions
+However, an `asyncio.Lock` is strictly process-local. It does not provide atomicity, mutual exclusion, or state durability across independent operating system processes (`Process A`, `Process B`, `Process C`). If multiple independent processes run concurrently, an in-process lock cannot prevent split-brain ownership or duplicated external executions.
 
-### 3.1. Authoritative Task State
-- **Storage**: Transactional Database (`tasks` table).
-- **Identifier**: `id` (UUIDv4) and `idempotency_key` (Unique text).
-- **Lifecycle States**:
-  - `QUEUED`: Waiting in durable queue for worker pick-up.
-  - `RUNNING`: Leased by an active worker.
-  - `RETRYING`: Worker crashed or lease expired; scheduled for retry.
-  - `COMPLETED`: Work completed and authoritative finding published.
-  - `FAILED`: Execution terminated with fatal error.
-  - `CANCELLED`: Explicitly aborted.
-  - `DEAD_LETTERED`: Exceeded `max_attempts`; quarantined for manual inspection.
-- **Invariants**:
-  - Exactly one task record exists per `idempotency_key`.
-  - Transitions are atomic and durable under database transaction.
+Stage 2 establishes a durable, transactional foundation across distributed processes.
 
-### 3.2. Authoritative Claim State
-- **Storage**: Transactional Database (`claims` table).
-- **Identifier**: `id` (UUIDv4) and `work_key` / `task_fingerprint` (Normalized semantic hash or task key).
-- **Lifecycle States**:
-  - `ACTIVE`: Currently owned by an active worker under a valid lease.
-  - `SUPERSEDED`: Replaced by a higher-priority claim (human or tiebreak winner within epsilon window).
-  - `REAPED`: Lease expired due to worker heartbeat failure; task liberated.
-  - `COMPLETED`: Final finding published; claim archived as successfully completed.
-- **Invariants**:
-  - At most one `ACTIVE` claim exists for a given `work_key` or active task.
-  - Any mutation requires holding the database write transaction.
-
-### 3.3. Lease State & Fencing
-- **Storage**: Transactional Database (`claim_leases` table).
-- **Attributes**:
-  - `claim_id` (Foreign key to `claims.id`).
-  - `owner_id` (Participant ID, e.g. `agent-1`).
-  - `worker_id` (Unique worker process UUID).
-  - `version` (Monotonically increasing integer).
-  - `attempt` (Integer attempt counter).
-  - `created_at` (ISO-8601 UTC).
-  - `heartbeat_at` (ISO-8601 UTC).
-  - `expires_at` (ISO-8601 UTC).
-  - `state` (`ACTIVE`, `EXPIRED`, `FENCED`, `RELEASED`).
-- **Fencing Invariants**:
-  - Every external call and completion verification requires `(claim_id, version, worker_id)`.
-  - If a worker dies and its lease expires, a new worker increments the lease `version` to `v + 1`.
-  - When the zombie worker returns, any attempt to heartbeat, complete, or publish work with version `v` is rejected with `LeaseFencedError`.
-
-### 3.4. Semantic Index State
-- **Storage**: ChromaDB (configured with durable storage directory `CHROMA_PERSIST_DIR`).
-- **Role**: Read-heavy advisory index for fast approximate nearest-neighbor search.
-- **Invariants**:
-  - Never authoritative for ownership.
-  - If Chroma is unavailable or stale, the transactional database guarantees safety (no duplicate claims).
-  - Updates are fed asynchronously via transactional outbox or safe write-through.
-
-### 3.5. Finding State
-- **Storage**: Transactional Database (`finding_metadata` table) + ChromaDB (`findings` namespace).
-- **Attributes**: `id`, `run_id`, `task_id`, `claim_id`, `participant_id`, `title`, `content`, `sources`, `created_at`.
-- **Invariants**:
-  - Finding publication is atomic with task state transition `RUNNING → COMPLETED`.
-  - Duplicate completion requests return the existing finding without re-publishing.
-
-### 3.6. Retry State
-- **Storage**: Transactional Database (`task_attempts` table).
-- **Attributes**: `id`, `task_id`, `attempt_number`, `worker_id`, `started_at`, `ended_at`, `status`, `error_message`.
-- **Invariants**:
-  - Tracks every attempt history for auditing, backoff calculation, and debugging.
-
-### 3.7. Worker State
-- **Storage**: Transactional Database (`workers` table).
-- **Attributes**: `id` (UUID), `hostname`, `pid`, `state`, `heartbeat_at`, `registered_at`.
-- **Lifecycle States**:
-  - `STARTING`: Initializing resources and registering.
-  - `READY`: Polling queue for work.
-  - `BUSY`: Actively executing a task lease.
-  - `DRAINING`: Completing current task before graceful shutdown; no new tasks accepted.
-  - `STOPPED`: Clean shutdown completed.
-  - `FAILED`: Declared dead by Reaper due to missed heartbeats.
-
-### 3.8. Audit State
-- **Storage**: Transactional Database (`audit_events` table).
-- **Attributes**: `id`, `run_id`, `task_id`, `event_type`, `actor_id`, `details`, `timestamp`.
-- **Invariants**:
-  - Append-only log of critical lifecycle transitions (claim granted, lease fenced, worker reaped, duplicate absorbed).
+**Phase B establishes the authoritative PostgreSQL persistence foundation** that later phases will use for distributed coordination.
 
 ---
 
-## 4. Concurrency & Cross-Process Mutual Exclusion
+## 2. Architectural Separation of Concerns
 
-### 4.1. The SQLite WAL Cross-Process Mutual Exclusion Model
-In local and edge environments, Quorum runs on SQLite with Write-Ahead Logging (`PRAGMA journal_mode=WAL;`) and `PRAGMA busy_timeout = 5000;`.
-- **OS-Level Locking**: SQLite uses OS file locks (`fcntl` on Linux/POSIX) to synchronize across independent OS processes.
-- **Immediate Write Transactions**: By initiating write operations with `BEGIN IMMEDIATE`, SQLite acquires a reserved lock immediately.
-- Only one process on the system can execute a claim transaction at any given millisecond.
-- Competing processes transparently wait up to 5,000ms.
-- This guarantees **strict serializability** across independent OS processes without needing an external distributed broker daemon.
+Quorum enforces a strict boundary between semantic candidate discovery and authoritative transactional ownership:
 
-### 4.2. Exactly-Once vs At-Least-Once Semantics
-| Subsystem | Semantics Guaranteed | Mechanism |
-| :--- | :--- | :--- |
-| **Task Queue Delivery** | At-Least-Once | Worker lease timeouts and retry requeuing guarantee tasks are never lost on worker crash. |
-| **Claim Ownership** | Exactly-Once | Atomic DB transaction with unique constraints and immediate write locks ensures at most one active claim exists per work identity. |
-| **External Work Execution** | At-Most-Once per Claim | Fenced `CoordinationToken` bound to `(claim_id, version)` prevents duplicate external calls. |
-| **Task Completion & Findings** | Exactly-Once | Idempotent completion check; duplicate publishes return existing finding record. |
+```text
+                    ┌─────────────────────────┐
+                    │       PostgreSQL        │
+                    │                         │
+                    │ AUTHORITATIVE STAGE 2   │
+                    │ COORDINATION STATE      │
+                    │                         │
+                    │ runs                    │
+                    │ tasks                   │
+                    │ claims                  │
+                    │ workers                 │
+                    │ findings metadata       │
+                    │ idempotency records     │
+                    │ audit events            │
+                    └────────────┬────────────┘
+                                 │
+                                 │ authoritative state
+                                 ▼
+                    ┌─────────────────────────┐
+                    │   Coordination Layer    │
+                    └────────────┬────────────┘
+                                 │
+                                 │ candidate retrieval
+                                 ▼
+                    ┌─────────────────────────┐
+                    │        ChromaDB         │
+                    │                         │
+                    │ SEMANTIC INDEX ONLY     │
+                    │                         │
+                    │ "What may be related?"  │
+                    └─────────────────────────┘
+```
+
+- **PostgreSQL answers**: *"Who authoritatively owns this task, for what duration, under what lease version, and with what lifecycle state?"*
+- **ChromaDB answers**: *"What existing claims or findings might be semantically related?"*
+
+### Critical Safety Invariants
+1. Chroma **NEVER** decides ownership.
+2. Chroma **NEVER** grants ownership or issues a `CoordinationToken`.
+3. Chroma is **NEVER** the authoritative claim store.
+4. If Chroma is unavailable, stale, or partitioned, PostgreSQL guarantees mutual exclusion and safety.
 
 ---
 
-## 5. Failure Recovery Workflows
+## 3. Authoritative State
 
-### 5.1. Worker Crash During External Work
-1. Worker A acquires task lease (claim version 1) and calls external API.
-2. Worker A's host/process crashes (kill -9).
-3. Reaper background process scans `claim_leases` and `workers`.
-4. Reaper observes `Worker A` heartbeat has timed out (`now - heartbeat_at > TTL`).
-5. Reaper marks `Worker A` as `FAILED`, marks claim lease as `EXPIRED`, increments `task.attempt_count`, and resets `task.state` to `RETRYING`.
-6. Worker B receives the task from the queue, acquires a new lease with **version 2**.
-7. If Worker A recovers or sends a late request, the lease check compares `token.version (1) == lease.version (2)`. Because version 1 < 2, the request is rejected with `LeaseFencedError`.
-8. Worker B completes the task authoritatively.
+PostgreSQL is the single authoritative source of truth for Stage 2 coordination entities, established via migration `001_initial_authoritative_state.sql`:
 
-### 5.2. Semantic Index (Chroma) Outage
-1. Worker completes claim transaction in the transactional database.
-2. Indexing into Chroma fails (e.g. disk error or temporary lock).
-3. The claim remains authoritative in the database.
-4. An outbox entry is marked as `PENDING` with retry count.
-5. The task proceeds to external work safely because ownership is verified via the database.
-6. The outbox background worker retries indexing into Chroma until successful.
-7. Result: Zero task loss, zero split-brain ownership.
+1. **`runs`**:
+   - Fields: `id` (PK), `question`, `status`, `metadata` (JSONB), `created_at`, `updated_at`.
+   - Check constraint on `status IN ('created', 'running', 'completed', 'failed', 'cancelled')`.
+   - Serves as the coordination boundary for tasks and claims.
+2. **`tasks`**:
+   - Fields: `id` (PK), `run_id` (FK), `task_key`, `description`, `status`, `metadata` (JSONB), `created_at`, `updated_at`.
+   - Check constraint on `status IN ('queued', 'running', 'retrying', 'completed', 'failed', 'cancelled', 'dead_lettered')`.
+   - Unique constraint: `UNIQUE(run_id, task_key)` ensuring deterministic canonical identity per run.
+3. **`claims`**:
+   - Fields: `id` (PK), `task_id` (FK), `run_id` (FK), `owner_id`, `owner_type`, `status`, `lease_id`, `lease_version`, `expires_at`, `created_at`, `updated_at`.
+   - Check constraints: `status IN ('active', 'superseded', 'expired', 'released', 'completed')`, `owner_type IN ('agent', 'human', 'adjudicator', 'reaper')`, and `lease_version >= 1`.
+   - Designed to support future lease fencing in Phase C/D.
+4. **`workers`**:
+   - Fields: `id` (PK), `run_id` (FK nullable), `worker_type`, `status`, `last_heartbeat_at`, `created_at`, `updated_at`.
+   - Check constraint: `status IN ('starting', 'ready', 'busy', 'draining', 'stopped', 'failed')`.
+5. **`findings`**:
+   - Fields: `id` (PK), `task_id` (FK nullable), `run_id` (FK), `claim_id` (FK nullable), `participant_id`, `participant_type`, `title`, `content_hash`, `sources` (JSONB), `supersedes`, `created_at`, `updated_at`.
+   - Stores authoritative metadata and sha256 content hashes. (Semantic embeddings remain in Chroma).
+6. **`idempotency_records`**:
+   - Fields: `id` (PK), `idempotency_key`, `scope`, `status`, `payload` (JSONB), `expires_at`, `created_at`, `updated_at`.
+   - Unique constraint: `UNIQUE(idempotency_key, scope)`.
+7. **`audit_events`**:
+   - Fields: `id` (BIGSERIAL PK), `run_id` (FK), `actor_id`, `event_type`, `entity_type`, `entity_id`, `details` (JSONB), `created_at`.
+   - Append-only coordination audit log.
+
+---
+
+## 4. Semantic State
+
+ChromaDB operates strictly as an approximate nearest-neighbor vector search index:
+- **Namespace isolation**: Collections `quorum_claims` and `quorum_findings`.
+- **Candidate boundary**: Mediated exclusively via `quorum/bus/candidate_retrieval.py` (`find_semantic_candidates()`).
+- **Data returned**: Document candidates, cosine distances, and normalized similarity scores.
+- **Coordination protocol**: The coordination layer queries Chroma to identify candidate collisions, but **all claim creation, lease validation, and status checks query PostgreSQL**. A candidate hit from Chroma does not confer ownership or authorization.
+
+---
+
+## 5. SQLite Transitional Responsibilities
+
+To preserve 100% backward compatibility with Stage 1 without breaking running APIs or test suites:
+- **SQLite remains responsible for**:
+  - Stage 1 API compatibility (`POST /runs`, `GET /runs/{id}`, `DELETE /runs/{id}`).
+  - Legacy run tracking (`runs` table in `quorum.db`).
+  - Participant consent records (`consent_events`).
+  - Session replay ordered action log (`replay_logs`).
+  - Telemetry suppression records (`telemetry_tombstones`).
+  - Right-to-erasure GDPR cascading workflow (`erase_run` in `quorum/db/erasure.py`).
+- **PostgreSQL becomes responsible for**:
+  - Stage 2 distributed coordination entities (`runs`, `tasks`, `claims`, `workers`, `findings`, `idempotency_records`, `audit_events`).
+- **No Competing Authority**:
+  During Phase B, SQLite and PostgreSQL do NOT compete for the same authority:
+  - SQLite serves the existing Stage 1 HTTP API and right-to-erasure workflows.
+  - PostgreSQL serves the Stage 2 authoritative coordination state.
+  - Consolidation of the run lifecycle will take place deliberately in later phases after cross-process claim arbitration (Phase C) is proven.
+
+---
+
+## 6. Transaction Boundary
+
+The transaction abstraction is defined in `quorum/db/transaction.py`:
+- **Context Manager**: `async with transaction(isolation="read_committed", pool=None) as tx_conn:`
+- **Commit / Rollback**: Automatically commits on successful exit of the block; automatically rolls back if an exception is raised, ensuring zero partial state remains.
+- **Ambient Connection Propagation**: Uses `contextvars.ContextVar` to propagate the active transaction connection down the asyncio task call stack. Repositories resolve connections via `resolve_connection()`, automatically reusing the ambient transaction connection without opening a redundant connection.
+- **Nested Transactions & Savepoints**: When `transaction()` is entered while an ambient transaction is already active, it automatically nests using an asyncpg transaction savepoint (`SAVEPOINT`).
+- **Row-Level Locking**: `claim_repo.get_active_claim_for_task(task_id, for_update=True)` executes `SELECT ... FOR UPDATE`, holding an exclusive row lock for the duration of the transaction. Independent connections attempting concurrent row locks wait or raise `LockNotAvailableError` if `NOWAIT` is requested.
+
+---
+
+## 7. Connection Lifecycle
+
+PostgreSQL connection management is implemented in `quorum/db/connection.py`:
+- **Driver**: `asyncpg>=0.29.0`.
+- **Pooling**: Global async connection pool managed via `init_pool()` and `close_pool()`.
+- **Configuration**:
+  - Configurable pool limits (default: `min_size=2`, `max_size=10`).
+  - Connection attempt timeout (default: `5.0s`).
+  - Command timeout (default: `60.0s`).
+- **Fail-Closed Behavior**:
+  If PostgreSQL is unreachable or connection pool checkout fails, the layer raises `DatabaseUnavailableError`.
+  Under this failure mode:
+  - NO authoritative claim is created.
+  - NO ownership is approved.
+  - NO `CoordinationToken` is granted.
+  - NO external work is permitted.
+  The system fails closed and never converts database failure into claim acceptance.
+- **Cleanup**: `close_pool()` safely terminates pool connections and clears references deterministically.
+
+---
+
+## 8. Migration Strategy
+
+Schema migrations are managed by `quorum/db/migrations/runner.py`:
+- **Deterministic Discovery**: Scans `quorum/db/migrations/` for files matching `^(\d+)_(.+)\.sql$` and sorts them numerically in ascending order.
+- **Tracking Table**: `schema_migrations` records `(version, name, applied_at)`. Only pending migrations are executed.
+- **Transactional Application**: Each SQL migration file executes within an isolated database transaction, recording its version in `schema_migrations` upon commit.
+- **Idempotency**: Executing `apply_migrations()` against an up-to-date database is a no-op and returns an empty list.
+- **Concurrent Migration Safety**: To prevent race conditions when multiple independent application or worker processes boot simultaneously, the runner acquires a PostgreSQL session-level advisory lock (`pg_advisory_lock(82749182)`). Only one process can execute migration checks and apply DDL at a time; all other processes wait and subsequently detect that migrations have already been applied.
+
+---
+
+## 9. Current Limitations
+
+Phase B establishes strictly the persistence foundation. In compliance with strict phase boundaries, the following capabilities are deliberately **not** implemented in this phase:
+
+```text
+Cross-process claim atomicity:
+NOT IMPLEMENTED
+
+Distributed lease arbitration:
+NOT IMPLEMENTED
+
+Fencing enforcement:
+NOT IMPLEMENTED
+
+Durable queue:
+NOT IMPLEMENTED
+
+Worker crash recovery:
+NOT IMPLEMENTED
+```
+
+These capabilities belong to subsequent phases:
+- **Phase C**: Cross-process atomic claim acquisition and tiebreak arbitration.
+- **Phase D**: Distributed lease heartbeating and fencing enforcement (`LeaseFencedError`).
+- **Phase E**: Durable task queueing and delivery.
+- **Phase F**: Worker crash recovery and Reaper integration with PostgreSQL.
