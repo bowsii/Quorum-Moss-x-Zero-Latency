@@ -94,3 +94,20 @@ class FindingRepository:
                 run_id,
             )
             return [dict(r) for r in rows]
+
+    async def get_completed_finding_for_task(
+        self,
+        task_id: str,
+        conn: Optional[asyncpg.Connection] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Retrieve any authoritative finding recorded for a task."""
+        async with resolve_connection(conn) as c:
+            row = await c.fetchrow(
+                """
+                SELECT id, task_id, run_id, claim_id, participant_id, participant_type,
+                       title, content_hash, sources, supersedes, created_at, updated_at
+                FROM findings WHERE task_id = $1 LIMIT 1;
+                """,
+                task_id,
+            )
+            return dict(row) if row else None

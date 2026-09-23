@@ -142,6 +142,14 @@ def get_pool() -> Optional[asyncpg.Pool]:
     return None
 
 
+def is_database_available() -> bool:
+    """Return True if an active pool is available or POSTGRES_URL is configured."""
+    pool = get_pool()
+    if pool is not None and not pool._closed:
+        return True
+    return bool(settings.POSTGRES_URL)
+
+
 @asynccontextmanager
 async def get_connection(
     pool: Optional[asyncpg.Pool] = None,
