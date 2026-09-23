@@ -187,13 +187,17 @@ def _cross_process_race_worker(
             "full_path_latency_ms": full_path_latency_ms,
         }
 
-    res = asyncio.run(_run())
-    result_queue.put(res)
+    try:
+        res = asyncio.run(_run())
+        result_queue.put(res)
+    except Exception as exc:
+        barrier.abort()
+        raise
 
 
 def _run_mp_race(n_contenders: int, pg_dsn: str, task_name: str) -> dict[str, Any]:
     """Execute n_contenders independent OS processes competing for the same task."""
-    ctx = mp.get_context("fork")
+    ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     barrier = ctx.Barrier(n_contenders)
     run_id = f"run-mp-race-{n_contenders}-{task_name}"
@@ -240,6 +244,7 @@ def _run_mp_race(n_contenders: int, pg_dsn: str, task_name: str) -> dict[str, An
 def test_two_process_race(pg_server_dsn):
     """2 independent OS processes racing for same task: exactly 1 owner, 1 capability, 1 external work."""
     summary = _run_mp_race(2, pg_server_dsn, "two-procs")
+    print(f"\n[N=2 RACE RESULTS] owners={summary['owners']} non_owners={summary['non_owners']} new_capabilities={summary['new_capabilities']} external_work={summary['external_work']} firewall_blocked={summary['firewall_blocked']}")
     assert summary["owners"] == 1, f"Expected 1 owner, got {summary['owners']}"
     assert summary["non_owners"] == 1, f"Expected 1 non-owner, got {summary['non_owners']}"
     assert summary["new_capabilities"] == 1, f"Expected 1 capability, got {summary['new_capabilities']}"
@@ -250,6 +255,7 @@ def test_two_process_race(pg_server_dsn):
 def test_ten_process_race(pg_server_dsn):
     """10 independent OS processes racing: exactly 1 owner, 9 non-owners, 1 capability, 1 external work."""
     summary = _run_mp_race(10, pg_server_dsn, "ten-procs")
+    print(f"\n[N=10 RACE RESULTS] owners={summary['owners']} non_owners={summary['non_owners']} new_capabilities={summary['new_capabilities']} external_work={summary['external_work']} firewall_blocked={summary['firewall_blocked']}")
     assert summary["owners"] == 1, f"Expected 1 owner, got {summary['owners']}"
     assert summary["non_owners"] == 9, f"Expected 9 non-owners, got {summary['non_owners']}"
     assert summary["new_capabilities"] == 1, f"Expected 1 capability, got {summary['new_capabilities']}"
@@ -260,6 +266,7 @@ def test_ten_process_race(pg_server_dsn):
 def test_fifty_process_race(pg_server_dsn):
     """50 independent OS processes racing: exactly 1 owner, 49 non-owners, 1 capability, 1 external work."""
     summary = _run_mp_race(50, pg_server_dsn, "fifty-procs")
+    print(f"\n[N=50 RACE RESULTS] owners={summary['owners']} non_owners={summary['non_owners']} new_capabilities={summary['new_capabilities']} external_work={summary['external_work']} firewall_blocked={summary['firewall_blocked']}")
     assert summary["owners"] == 1, f"Expected 1 owner, got {summary['owners']}"
     assert summary["non_owners"] == 49, f"Expected 49 non-owners, got {summary['non_owners']}"
     assert summary["new_capabilities"] == 1, f"Expected 1 capability, got {summary['new_capabilities']}"
@@ -278,11 +285,13 @@ def test_hundred_process_race(pg_server_dsn):
     firewall_blocked == 99
     """
     summary = _run_mp_race(100, pg_server_dsn, "hundred-procs")
+    print(f"\n[N=100 RACE RESULTS] owners={summary['owners']} non_owners={summary['non_owners']} new_capabilities={summary['new_capabilities']} external_work={summary['external_work']} firewall_blocked={summary['firewall_blocked']}")
     assert summary["owners"] == 1, f"Expected 1 owner, got {summary['owners']}"
     assert summary["non_owners"] == 99, f"Expected 99 non-owners, got {summary['non_owners']}"
     assert summary["new_capabilities"] == 1, f"Expected 1 capability, got {summary['new_capabilities']}"
     assert summary["external_work"] == 1, f"Expected 1 external work, got {summary['external_work']}"
     assert summary["firewall_blocked"] == 99, f"Expected 99 firewall blocks, got {summary['firewall_blocked']}"
+
 
 
 # ===========================================================================

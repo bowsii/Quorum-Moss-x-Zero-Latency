@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: quorum-backend
+    runtime: python
+    rootDir: quorum
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: quorum-db
+          property: connectionString
+      - key: FRONTEND_URL
+        value: https://quorum-frontend.vercel.app
+
+databases:
+  - name: quorum-db
+    databaseName: quorum
+    user: quorum

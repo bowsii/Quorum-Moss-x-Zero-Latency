@@ -114,3 +114,33 @@ async def test_atomic_claim_deduplication():
     assert is_dup2 is True
     assert c2.id == c1.id
 
+
+@pytest.mark.asyncio
+async def test_lifespan_production_startup_fails_without_postgres():
+    """FastAPI startup MUST fail when ENVIRONMENT=production and authoritative PostgreSQL is unavailable."""
+    from config.settings import settings
+    from db.connection import DatabaseUnavailableError
+    from api.main import lifespan
+
+    orig_env = settings.ENVIRONMENT
+    orig_pg = settings.POSTGRES_URL
+    try:
+        settings.ENVIRONMENT = "production"
+        settings.POSTGRES_URL = ""
+        with pytest.raises(DatabaseUnavailableError):
+            async with lifespan(app):
+                pass
+    finally:
+        settings.ENVIRONMENT = orig_env
+        settings.POSTGRES_URL = orig_pg
+
+
+def test_cors_configuration_production_safe():
+    """Verify that CORS middleware does not permit wildcard origins when credentials are enabled."""
+    from fastapi.middleware.cors import CORSMiddleware
+    for middleware in app.user_middleware:
+        if middleware.cls == CORSMiddleware:
+            allow_origins = middleware.kwargs.get("allow_origins", [])
+            assert "*" not in allow_origins, "Wildcard '*' must never be used with credentials enabled"
+
+

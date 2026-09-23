@@ -111,6 +111,10 @@ class Settings(BaseSettings):
             "Used to gate hard assertions and debug behaviour."
         ),
     )
+    FRONTEND_URL: str = Field(
+        default="https://quorum-frontend.vercel.app",
+        description="Deployed frontend origin URL for CORS authorization.",
+    )
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":

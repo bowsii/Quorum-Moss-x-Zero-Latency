@@ -16,11 +16,9 @@ from reaper.reaper import Reaper
 from adjudicator.adjudicator import Adjudicator
 from inference.router import inference_router
 
-# Mock LLM inference to simulate fast local response without missing-key timeouts
-inference_router.complete = AsyncMock(return_value="Tension between findings analyzed.")
-
-
 async def run_full_contention_benchmark():
+    # Mock LLM inference to simulate fast local response without missing-key timeouts
+    inference_router.complete = AsyncMock(return_value="Tension between findings analyzed.")
     reaper = Reaper(ttl=2, scan_interval=1)
     adjudicator = Adjudicator()
 
